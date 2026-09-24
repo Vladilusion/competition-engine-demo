@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+      - name: PHP syntax
+        run: find config public src tests -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Domain and application tests
+        run: php tests/run.php
+      - name: Start MySQL 8.4
+        run: docker run -d --name mysql -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=competition_demo -e MYSQL_USER=competition -e MYSQL_PASSWORD=competition -p 3306:3306 mysql:8.4
+      - name: Wait for authenticated MySQL readiness
+        run: |
+          ready=0
+          for attempt in {1..60}; do
+            if docker exec -e MYSQL_PWD=competition mysql mysql --protocol=TCP -h127.0.0.1 -ucompetition -Dcompetition_demo -e 'SELECT 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo 'MySQL did not accept an authenticated query within 120 seconds.' >&2
+            docker logs mysql
+            exit 1
+          fi
+      - name: Import schema and seed fixtures
+        run: |
+          docker exec -i -e MYSQL_PWD=root mysql mysql -uroot < database/schema.sql
+          docker exec -i -e MYSQL_PWD=root mysql mysql -uroot < database/seed.sql
+      - name: MySQL integration checks
+        env:
+          DB_DSN: mysql:host=127.0.0.1;port=3306;dbname=competition_demo;charset=utf8mb4
+          DB_USER: competition
+          DB_PASSWORD: competition
+        run: php tests/integration.php
