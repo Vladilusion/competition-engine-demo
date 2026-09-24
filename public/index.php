@@ -47,14 +47,31 @@ $participants = $gateway->participants($competitionId);
 $matches = $gateway->matches($competitionId, $participantId);
 $ranking = $gateway->ranking($competitionId);
 $hypotheses = [];
+$simulationError = null;
 foreach ($matches as $match) {
-    $home = filter_input(INPUT_GET, 'sim_home_' . $match['id'], FILTER_VALIDATE_INT);
-    $away = filter_input(INPUT_GET, 'sim_away_' . $match['id'], FILTER_VALIDATE_INT);
-    if ($match['status'] === 'scheduled' && $home !== false && $home !== null && $away !== false && $away !== null) {
-        $hypotheses[$match['id']] = ['home' => $home, 'away' => $away];
+    $homeKey = 'sim_home_' . $match['id'];
+    $awayKey = 'sim_away_' . $match['id'];
+    if ($match['status'] !== 'scheduled' || (!array_key_exists($homeKey, $_GET) && !array_key_exists($awayKey, $_GET))) {
+        continue;
+    }
+    $range = ['options' => ['min_range' => 0, 'max_range' => 99]];
+    $home = filter_input(INPUT_GET, $homeKey, FILTER_VALIDATE_INT, $range);
+    $away = filter_input(INPUT_GET, $awayKey, FILTER_VALIDATE_INT, $range);
+    if ($home === false || $home === null || $away === false || $away === null) {
+        $simulationError = 'Simulation scores must be whole numbers between 0 and 99.';
+        $hypotheses = [];
+        break;
+    }
+    $hypotheses[$match['id']] = ['home' => $home, 'away' => $away];
+}
+$projected = [];
+if ($hypotheses && $simulationError === null) {
+    try {
+        $projected = (new SimulationService($gateway, new ScoringEngine()))->project($competitionId, $hypotheses);
+    } catch (InvalidArgumentException $error) {
+        $simulationError = $error->getMessage();
     }
 }
-$projected = $hypotheses ? (new SimulationService($gateway, new ScoringEngine()))->project($competitionId, $hypotheses) : [];
 ?><!doctype html>
 <html lang="en">
 <head>
@@ -76,7 +93,7 @@ $projected = $hypotheses ? (new SimulationService($gateway, new ScoringEngine())
             <?php else: ?><form method="post" class="score-form"><input type="hidden" name="csrf" value="<?= e($_SESSION['csrf']) ?>"><input type="hidden" name="action" value="predict"><input type="hidden" name="match_id" value="<?= e($match['id']) ?>"><label>Prediction <span><input aria-label="Home score" name="home_score" type="number" min="0" max="99" value="<?= e($match['predicted_home']) ?>" required> — <input aria-label="Away score" name="away_score" type="number" min="0" max="99" value="<?= e($match['predicted_away']) ?>" required></span></label><label class="check"><input type="checkbox" name="wildcard" <?= $match['is_wildcard'] ? 'checked' : '' ?>> 1.5× wildcard</label><button <?= !$open ? 'disabled' : '' ?>><?= $open ? 'Save prediction' : 'Predictions closed' ?></button><small>Closes <?= e((new DateTimeImmutable($match['closes_at']))->format('M j, H:i T')) ?></small></form><?php endif; ?>
         </article><?php endforeach; ?></div></section>
     <section id="ranking" class="panel"><div class="section-head"><div><p class="eyebrow">LIVE TABLE</p><h2>Official ranking</h2></div><span class="muted">Points · exact scores · name</span></div><?= renderRanking($ranking) ?></section>
-    <section id="simulator" class="panel simulator"><div class="section-head"><div><p class="eyebrow">SANDBOX</p><h2>Scenario simulator</h2></div><span class="badge simulated">Non-persistent</span></div><p class="muted">Explore future outcomes. Projections are calculated in memory and never change official results or awarded points.</p><form method="get"><input type="hidden" name="participant" value="<?= e($participantId) ?>"><div class="sim-fields"><?php foreach ($matches as $match): if ($match['status'] !== 'scheduled') continue; ?><label><?= e($match['home_team']) ?> — <?= e($match['away_team']) ?><span><input type="number" min="0" max="99" name="sim_home_<?= e($match['id']) ?>" value="<?= e($hypotheses[$match['id']]['home'] ?? '') ?>" required> : <input type="number" min="0" max="99" name="sim_away_<?= e($match['id']) ?>" value="<?= e($hypotheses[$match['id']]['away'] ?? '') ?>" required></span></label><?php endforeach; ?></div><button>Run projection</button></form><?php if ($projected): ?><h3>Simulated ranking</h3><?= renderRanking($projected) ?><?php endif; ?></section>
+    <section id="simulator" class="panel simulator"><div class="section-head"><div><p class="eyebrow">SANDBOX</p><h2>Scenario simulator</h2></div><span class="badge simulated">Non-persistent</span></div><p class="muted">Explore future outcomes. Projections are calculated in memory and never change official results or awarded points.</p><?php if ($simulationError): ?><div class="notice error" role="alert"><?= e($simulationError) ?></div><?php endif; ?><form method="get"><input type="hidden" name="participant" value="<?= e($participantId) ?>"><div class="sim-fields"><?php foreach ($matches as $match): if ($match['status'] !== 'scheduled') continue; ?><label><?= e($match['home_team']) ?> — <?= e($match['away_team']) ?><span><input type="number" min="0" max="99" name="sim_home_<?= e($match['id']) ?>" value="<?= e($hypotheses[$match['id']]['home'] ?? '') ?>" required> : <input type="number" min="0" max="99" name="sim_away_<?= e($match['id']) ?>" value="<?= e($hypotheses[$match['id']]['away'] ?? '') ?>" required></span></label><?php endforeach; ?></div><button>Run projection</button></form><?php if ($projected): ?><h3>Simulated ranking</h3><?= renderRanking($projected) ?><?php endif; ?></section>
     <details class="panel admin"><summary>Demo administration</summary><p>Finalize a scheduled match. Requires the local <code>ADMIN_TOKEN</code>.</p><form method="post" class="admin-form"><input type="hidden" name="csrf" value="<?= e($_SESSION['csrf']) ?>"><input type="hidden" name="action" value="finalize"><select name="match_id"><?php foreach ($matches as $m): if ($m['status'] === 'scheduled'): ?><option value="<?= e($m['id']) ?>"><?= e($m['home_team'] . ' vs ' . $m['away_team']) ?></option><?php endif; endforeach; ?></select><input name="home_score" type="number" min="0" max="99" placeholder="Home" required><input name="away_score" type="number" min="0" max="99" placeholder="Away" required><input name="admin_token" type="password" placeholder="Admin token" required><button>Finalize result</button></form></details>
 </main><footer><div class="wrap">Independent portfolio reference implementation · Synthetic data only</div></footer>
 </body></html>

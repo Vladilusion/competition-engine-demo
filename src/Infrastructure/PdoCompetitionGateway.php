@@ -10,6 +10,7 @@ use CompetitionDemo\Domain\ScoringEngine;
 use DateTimeImmutable;
 use DomainException;
 use PDO;
+use PDOException;
 use Throwable;
 
 final readonly class PdoCompetitionGateway implements CompetitionGateway
@@ -35,7 +36,14 @@ final readonly class PdoCompetitionGateway implements CompetitionGateway
     {
         $this->pdo->beginTransaction();
         try {
-            // Re-lock the authoritative match row inside the write transaction to close TOCTOU races.
+            // This membership row is the per-participant/competition serialization point.
+            // Locking it prevents concurrent requests from both passing the wildcard check.
+            $membership = $this->pdo->prepare('SELECT participant_id FROM competition_participants WHERE competition_id = :competition_id AND participant_id = :participant_id FOR UPDATE');
+            $membership->execute(['competition_id' => $competitionId, 'participant_id' => $participantId]);
+            if ($membership->fetchColumn() === false) {
+                throw new DomainException('Participant is not authorized for this competition.');
+            }
+
             $lock = $this->pdo->prepare('SELECT status, closes_at FROM matches WHERE id = :match_id AND competition_id = :competition_id FOR UPDATE');
             $lock->execute(['match_id' => $matchId, 'competition_id' => $competitionId]);
             $match = $lock->fetch();
@@ -43,18 +51,34 @@ final readonly class PdoCompetitionGateway implements CompetitionGateway
                 throw new DomainException('Predictions are closed for this match.');
             }
 
-            $sql = 'INSERT INTO predictions (competition_id, match_id, participant_id, home_score, away_score, is_wildcard)
-                    VALUES (:competition_id, :match_id, :participant_id, :home_score, :away_score, :is_wildcard)
-                    ON DUPLICATE KEY UPDATE home_score = VALUES(home_score), away_score = VALUES(away_score), is_wildcard = VALUES(is_wildcard), updated_at = CURRENT_TIMESTAMP';
-            $statement = $this->pdo->prepare($sql);
-            $statement->execute([
-                'competition_id' => $competitionId, 'match_id' => $matchId, 'participant_id' => $participantId,
-                'home_score' => $score->home, 'away_score' => $score->away, 'is_wildcard' => (int) $wildcard,
-            ]);
+            if ($wildcard) {
+                $wildcardCheck = $this->pdo->prepare('SELECT id FROM predictions WHERE competition_id = :competition_id AND participant_id = :participant_id AND is_wildcard = 1 AND match_id <> :match_id FOR UPDATE');
+                $wildcardCheck->execute(['competition_id' => $competitionId, 'participant_id' => $participantId, 'match_id' => $matchId]);
+                if ($wildcardCheck->fetchColumn() !== false) {
+                    throw new DomainException('The wildcard has already been used in this competition.');
+                }
+            }
+
+            $existing = $this->pdo->prepare('SELECT id FROM predictions WHERE match_id = :match_id AND participant_id = :participant_id FOR UPDATE');
+            $existing->execute(['match_id' => $matchId, 'participant_id' => $participantId]);
+            $predictionId = $existing->fetchColumn();
+            if ($predictionId !== false) {
+                $statement = $this->pdo->prepare('UPDATE predictions SET home_score = :home_score, away_score = :away_score, is_wildcard = :is_wildcard, updated_at = CURRENT_TIMESTAMP WHERE id = :id');
+                $statement->execute(['home_score' => $score->home, 'away_score' => $score->away, 'is_wildcard' => (int) $wildcard, 'id' => $predictionId]);
+            } else {
+                $statement = $this->pdo->prepare('INSERT INTO predictions (competition_id, match_id, participant_id, home_score, away_score, is_wildcard) VALUES (:competition_id, :match_id, :participant_id, :home_score, :away_score, :is_wildcard)');
+                $statement->execute([
+                    'competition_id' => $competitionId, 'match_id' => $matchId, 'participant_id' => $participantId,
+                    'home_score' => $score->home, 'away_score' => $score->away, 'is_wildcard' => (int) $wildcard,
+                ]);
+            }
             $this->pdo->commit();
         } catch (Throwable $error) {
             if ($this->pdo->inTransaction()) {
                 $this->pdo->rollBack();
+            }
+            if ($error instanceof PDOException && $error->getCode() === '23000') {
+                throw new DomainException('Prediction conflicts with an existing competition entry.', 0, $error);
             }
             throw $error;
         }
@@ -66,8 +90,12 @@ final readonly class PdoCompetitionGateway implements CompetitionGateway
         try {
             $lock = $this->pdo->prepare('SELECT status FROM matches WHERE id = :match_id AND competition_id = :competition_id FOR UPDATE');
             $lock->execute(['match_id' => $matchId, 'competition_id' => $competitionId]);
-            if ($lock->fetchColumn() === false) {
+            $status = $lock->fetchColumn();
+            if ($status === false) {
                 throw new DomainException('Match not found in this competition.');
+            }
+            if ($status !== 'scheduled') {
+                throw new DomainException('This match is already finalized; official results cannot be replaced.');
             }
             $update = $this->pdo->prepare("UPDATE matches SET status = 'finalized', home_score = :home, away_score = :away, finalized_at = :finalized_at WHERE id = :match_id AND competition_id = :competition_id");
             $update->execute(['home' => $result->home, 'away' => $result->away, 'finalized_at' => $now->format('Y-m-d H:i:s'), 'match_id' => $matchId, 'competition_id' => $competitionId]);

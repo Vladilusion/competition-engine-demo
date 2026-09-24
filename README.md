@@ -11,8 +11,8 @@ This portfolio project turns a compact sports-prediction domain into real execut
 ## Engineering highlights
 
 - **Deterministic domain model:** pure value objects and scoring service, independent of HTTP and storage.
-- **Integrity under concurrency:** server time is authoritative; a match row is locked and its closing time is rechecked inside the prediction transaction.
-- **Atomic finalization:** result update and every prediction award commit or roll back together.
+- **Integrity under concurrency:** a competition-membership lock serializes each participant's writes; wildcard usage and the authoritative match deadline are rechecked inside the transaction.
+- **Atomic, one-way finalization:** result update and every prediction award commit or roll back together, and finalized results cannot be silently replaced.
 - **Stable rankings:** MySQL 8 `ROW_NUMBER()` orders by points, exact results, participant name, then immutable ID.
 - **Safe simulation:** a read-only snapshot is projected in memory; no write method is called.
 - **Defense in depth:** native prepared statements, CSRF tokens, escaped output, strict validation, secure cookie flags, and a separate admin token boundary.
@@ -90,13 +90,14 @@ find config public src tests -name '*.php' -print0 | xargs -0 -n1 php -l
 git diff --check
 ```
 
-The lightweight test runner covers exact score, goal difference, winner, draw, incorrect prediction, wildcard multiplication, precedence, prediction timing boundaries, and simulator isolation. CI also imports the schema and seed into MySQL 8.
+The lightweight test runner covers exact score, goal difference, winner, draw, incorrect prediction, wildcard multiplication, precedence, prediction timing boundaries, and simulator isolation. CI waits for a successful authenticated query, imports the schema and seed into MySQL 8.4, then runs database-backed smoke checks for ranking, explicit prediction insert/update, second-wildcard isolation, and one-way finalization.
 
 ## Security and integrity
 
 - Scores are integer-only and range checked in both HTTP input and the domain object.
 - Prediction context verifies participant membership and match ownership.
-- The initial deadline check provides a useful response; the row-lock/recheck inside the transaction is the final authority.
+- The initial deadline check provides a useful response; membership serialization plus the match row-lock/deadline and wildcard rechecks inside the transaction are the final authority.
+- Prediction updates target an explicitly selected row; no ambiguous multi-constraint upsert can mutate a different wildcard prediction.
 - Every write uses a prepared statement and transactional error rollback.
 - POST actions require session-bound CSRF tokens; cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` under HTTPS.
 - Result finalization requires an environment-supplied admin token. This intentionally simple demo boundary should be replaced by identity/RBAC in production.
