@@ -19,11 +19,17 @@ This portfolio project turns a compact sports-prediction domain into real execut
 
 ## Screenshots
 
-The application includes a polished responsive dashboard. Future release screenshots can be stored under `docs/screenshots/`:
+### Competition dashboard
 
-| Desktop dashboard | Mobile match cards |
-| --- | --- |
-| _Screenshot placeholder_ | _Screenshot placeholder_ |
+Real desktop view of the runnable demo, showing finalized and scheduled matches, participant predictions, scoring feedback, and wildcard selection.
+
+![Competition dashboard](docs/screenshots/competition-dashboard.png)
+
+### Ranking & scenario simulation
+
+Official ranking alongside the non-persistent scenario simulator. Hypothetical results recalculate a projected ranking in memory without modifying official results or awarded scores.
+
+![Ranking and scenario simulation](docs/screenshots/ranking-simulator.png)
 
 ## Architecture
 
